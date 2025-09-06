@@ -320,11 +320,28 @@
                         return `<div class="data-item"><strong>Recommended Image:</strong> Generation ${parseInt(value) + 1}</div>`;
                     } else if (key === 'confidence') {
                         return `<div class="data-item"><strong>Confidence:</strong> ${(parseFloat(value) * 100).toFixed(0)}%</div>`;
+                    } else if (key === 'lipsync_videos') {
+                        // Handle multiple lipsynced videos
+                        return `
+                            <div class="lipsync-videos-grid">
+                                ${value.map(video => `
+                                    <div class="lipsync-video-item">
+                                        <h5>Lipsync Version ${video.id}</h5>
+                                        <video controls width="350" height="260">
+                                            <source src="${video.video_url}" type="video/mp4">
+                                            Your browser does not support the video tag.
+                                        </video>
+                                        <div class="lipsync-text-preview">
+                                            <strong>Text:</strong> <em>"${video.text.substring(0, 80)}..."</em>
+                                        </div>
+                                        <div class="lipsync-voice">Voice: ${video.voice_id}</div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        `;
                     } else if (key === 'video_url') {
-                        // Check if this is a lipsync video (has text and voice_id in same data)
-                        const isLipsyncVideo = stepData.data.text && stepData.data.voice_id;
-                        const videoLabel = isLipsyncVideo ? 'Lipsynced Video with Audio' : 'Generated Video';
-                        return `<div class="data-item video-container"><strong>${videoLabel}:</strong><br><video controls width="400" height="300"><source src="${value}" type="video/mp4">Your browser does not support the video tag.</video></div>`;
+                        // Regular single video
+                        return `<div class="data-item video-container"><strong>Generated Video:</strong><br><video controls width="400" height="300"><source src="${value}" type="video/mp4">Your browser does not support the video tag.</video></div>`;
                     } else if (key === 'text') {
                         return `<div class="data-item"><strong>Spoken Text:</strong> <em>"${value}"</em></div>`;
                     } else if (key === 'voice_id') {
@@ -359,7 +376,7 @@
             // Collect all generated images and videos for final display
             const allImages = [];
             const allVideos = [];
-            let lipsyncVideo = null;
+            let lipsyncVideos = [];
             
             Object.values(currentSteps).forEach(step => {
                 if (step.images) {
@@ -375,13 +392,9 @@
                     allVideos.push(...step.data.all_videos);
                 }
                 
-                // Check for lipsync video
-                if (step.title === 'Apply Lipsync' && step.data && step.data.video_url) {
-                    lipsyncVideo = {
-                        video_url: step.data.video_url,
-                        text: step.data.text,
-                        voice_id: step.data.voice_id
-                    };
+                // Check for lipsync videos (multiple)
+                if (step.title === 'Apply Lipsync' && step.data && step.data.lipsync_videos) {
+                    lipsyncVideos = step.data.lipsync_videos;
                 }
             });
             
@@ -408,19 +421,24 @@
                 `;
             }
             
-            // Show lipsynced video first if available
-            if (lipsyncVideo) {
+            // Show lipsynced videos first if available
+            if (lipsyncVideos.length > 0) {
                 resultsHTML += `
-                    <h4>🎤 Lipsynced Video with Audio:</h4>
-                    <div class="lipsync-video-container">
-                        <video controls width="500" height="375" autoplay>
-                            <source src="${lipsyncVideo.video_url}" type="video/mp4">
-                            Your browser does not support the video tag.
-                        </video>
-                        <div class="lipsync-info">
-                            <div class="lipsync-text"><strong>Spoken Text:</strong> <em>"${lipsyncVideo.text}"</em></div>
-                            <div class="lipsync-voice"><strong>Voice:</strong> ${lipsyncVideo.voice_id}</div>
-                        </div>
+                    <h4>🎤 Lipsynced Videos with Audio:</h4>
+                    <div class="lipsync-videos-final-grid">
+                        ${lipsyncVideos.map(video => `
+                            <div class="lipsync-video-final-item">
+                                <h5>Version ${video.id}</h5>
+                                <video controls width="450" height="340" ${video.id === 1 ? 'autoplay' : ''}>
+                                    <source src="${video.video_url}" type="video/mp4">
+                                    Your browser does not support the video tag.
+                                </video>
+                                <div class="lipsync-info">
+                                    <div class="lipsync-text"><strong>Text:</strong> <em>"${video.text}"</em></div>
+                                    <div class="lipsync-voice"><strong>Voice:</strong> ${video.voice_id}</div>
+                                </div>
+                            </div>
+                        `).join('')}
                     </div>
                 `;
             }

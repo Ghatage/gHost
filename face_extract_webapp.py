@@ -172,7 +172,7 @@ class FaceExtractWebapp:
             all_image_urls = frame_urls + [host_url]
             
             # Call nano-banana edit
-            prompt = f"This image is a screenshot from a podcast studio where the host is talking. Imagine a new angle of the same studio with the man in red shirt instead of the current person. The scene should look and match the aesthetic of the existing image. Also there should be no one else apart from the man in the red shirt in the final image. The man in the red shirt is looking in the same direction as the original person from the image."
+            prompt = f"This image is a screenshot from a podcast studio where the host is talking. Imagine a new angle of the same studio with the man in the white tshirt and green jacket of the current person. The scene should look and match the aesthetic of the existing image. Also there should be no one else apart from the man in the white shirt and green jacket in the final image. The man in the white shirt and green jacket is looking in the same direction as the original person from the image."
             
             result = fal_client.subscribe(
                 "fal-ai/nano-banana/edit",
@@ -430,73 +430,151 @@ Respond in JSON format:
             }
 
 
-    def apply_lipsync_to_talking_video(self, talking_video_url, output_dir):
-        """Apply lipsync to the talking animation video using Kling API.
+    def apply_parallel_lipsync_to_talking_video(self, talking_video_url, output_dir):
+        """Apply lipsync to the talking animation video using Kling API with two different texts in parallel.
         
         Args:
             talking_video_url (str): URL of the talking animation video from VEO2
             output_dir (str): Directory to save results
             
         Returns:
-            dict: Result containing the lipsynced video URL and metadata
+            dict: Results containing both lipsynced video URLs and metadata
         """
+        import requests
+        import tempfile
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        # First, download the VEO2 video and upload it to fal.ai
         try:
-            # The text to be spoken
-            text = "Simply put, the idea shifts from monthly payments to giving everyone ownership shares and real decision-making power."
-            text2 = "In short, distributing AI-created value can be designed as a global system, not limited by where technology originated."
+            print(f"Downloading VEO2 video from: {talking_video_url}")
+            response = requests.get(talking_video_url)
+            response.raise_for_status()
             
-            # Define queue update handler for progress logging
-            def on_queue_update(update):
-                if isinstance(update, fal_client.InProgress):
-                    for log in update.logs:
-                        print(f"Lipsync Progress: {log['message']}")
+            # Save to temporary file
+            with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp_file:
+                tmp_file.write(response.content)
+                temp_video_path = tmp_file.name
             
-            # Call Kling lipsync API with correct endpoint
-            result = fal_client.subscribe(
-                "fal-ai/kling-video/lipsync/text-to-video",
-                arguments={
-                    "video_url": talking_video_url,
-                    "text": text,
-                    "voice_id": "oversea_male1"  # Using oversea_male1 voice
-                },
-                with_logs=True,
-                on_queue_update=on_queue_update
-            )
+            print(f"Uploading video to fal.ai...")
+            # Upload to fal.ai to get a fal.media URL
+            uploaded_video = fal_client.upload_file(temp_video_path)
+            fal_video_url = uploaded_video if isinstance(uploaded_video, str) else uploaded_video.url
+            print(f"Video uploaded to fal.ai: {fal_video_url}")
             
-            # Download the lipsynced video if successful
-            if result and 'video' in result:
-                import requests
-                video_url = result['video']['url'] if isinstance(result['video'], dict) else result['video']
-                
-                # Download and save the lipsynced video
-                response = requests.get(video_url)
-                response.raise_for_status()
-                
-                output_path = os.path.join(output_dir, "talking_with_lipsync.mp4")
-                with open(output_path, 'wb') as f:
-                    f.write(response.content)
-                
-                return {
-                    "success": True,
-                    "video_url": video_url,
-                    "local_path": output_path,
-                    "text": text,
-                    "voice_id": "oversea_male1",
-                    "original_video_url": talking_video_url
-                }
-            else:
-                return {
-                    "success": False,
-                    "error": "No video URL in Kling response",
-                    "original_video_url": talking_video_url
-                }
-                
+            # Clean up temp file
+            os.unlink(temp_video_path)
+            
         except Exception as e:
             return {
                 "success": False,
-                "error": str(e),
-                "original_video_url": talking_video_url
+                "error": f"Failed to upload video to fal.ai: {str(e)}",
+                "original_video_url": talking_video_url,
+                "lipsync_results": []
             }
+        
+        # The two texts to be spoken
+        texts = [
+            {
+                "id": 1,
+                "text": "Simply put, the idea shifts from monthly payments to giving everyone ownership shares and real decision-making power.",
+                "filename": "talking_lipsync_1.mp4"
+            },
+            {
+                "id": 2,
+                "text": "In short, distributing AI-created value can be designed as a global system, not limited by where technology originated.",
+                "filename": "talking_lipsync_2.mp4"
+            }
+        ]
+        
+        def process_single_lipsync(text_info):
+            """Process a single lipsync request"""
+            try:
+                # Define queue update handler for progress logging
+                def on_queue_update(update):
+                    if isinstance(update, fal_client.InProgress):
+                        for log in update.logs:
+                            print(f"Lipsync {text_info['id']} Progress: {log['message']}")
+                
+                # Call Kling lipsync API with the fal.media URL
+                result = fal_client.subscribe(
+                    "fal-ai/kling-video/lipsync/text-to-video",
+                    arguments={
+                        "video_url": fal_video_url,  # Use the uploaded fal.media URL
+                        "text": text_info['text'],
+                        "voice_id": "oversea_male1"  # Using oversea_male1 voice
+                    },
+                    with_logs=True,
+                    on_queue_update=on_queue_update
+                )
+                
+                # Download the lipsynced video if successful
+                if result and 'video' in result:
+                    video_url = result['video']['url'] if isinstance(result['video'], dict) else result['video']
+                    
+                    # Download and save the lipsynced video
+                    response = requests.get(video_url)
+                    response.raise_for_status()
+                    
+                    output_path = os.path.join(output_dir, text_info['filename'])
+                    with open(output_path, 'wb') as f:
+                        f.write(response.content)
+                    
+                    return {
+                        "success": True,
+                        "id": text_info['id'],
+                        "video_url": video_url,
+                        "local_path": output_path,
+                        "text": text_info['text'],
+                        "voice_id": "oversea_male1"
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "id": text_info['id'],
+                        "error": "No video URL in Kling response",
+                        "text": text_info['text']
+                    }
+                    
+            except Exception as e:
+                return {
+                    "success": False,
+                    "id": text_info['id'],
+                    "error": str(e),
+                    "text": text_info['text']
+                }
+        
+        # Process both lipsyncs in parallel
+        results = []
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            # Submit both lipsync tasks
+            future_to_text = {
+                executor.submit(process_single_lipsync, text_info): text_info
+                for text_info in texts
+            }
+            
+            # Collect results
+            for future in as_completed(future_to_text):
+                text_info = future_to_text[future]
+                try:
+                    result = future.result()
+                    results.append(result)
+                except Exception as e:
+                    results.append({
+                        "success": False,
+                        "id": text_info['id'],
+                        "error": str(e),
+                        "text": text_info['text']
+                    })
+        
+        # Sort results by ID to maintain order
+        results.sort(key=lambda x: x['id'])
+        
+        # Return combined results
+        return {
+            "success": all(r['success'] for r in results),
+            "original_video_url": talking_video_url,
+            "lipsync_results": results
+        }
 
     def create_parallel_animations(self, best_image_path, unused_param, output_dir):
         """Create four parallel VEO2 animations with different actions.
@@ -993,11 +1071,11 @@ Respond in JSON format:
                 f"Parallel animations failed: {str(e)}"
             )
         
-        # Step 9: Apply Lipsync to Talking Video
+        # Step 9: Apply Lipsync to Talking Video (2 parallel versions)
         yield self.emit_step(
             "Apply Lipsync",
             "active",
-            "Adding audio and lipsync to the talking animation..."
+            "Creating 2 parallel lipsynced versions with different texts..."
         )
         
         try:
@@ -1011,26 +1089,41 @@ Respond in JSON format:
                     break
             
             if talking_video_url:
-                # Apply lipsync to the talking video
-                lipsync_result = self.apply_lipsync_to_talking_video(talking_video_url, output_dir)
+                # Apply parallel lipsync to the talking video
+                lipsync_result = self.apply_parallel_lipsync_to_talking_video(talking_video_url, output_dir)
                 
                 if lipsync_result['success']:
+                    # Prepare data for both lipsynced videos
+                    lipsync_data = {
+                        "lipsync_videos": []
+                    }
+                    
+                    for result in lipsync_result['lipsync_results']:
+                        if result['success']:
+                            lipsync_data["lipsync_videos"].append({
+                                "id": result['id'],
+                                "video_url": result['video_url'],
+                                "text": result['text'],
+                                "voice_id": result['voice_id']
+                            })
+                    
                     yield self.emit_step(
                         "Apply Lipsync",
                         "completed",
-                        "Successfully added audio and lipsync to the talking animation!",
-                        data={
-                            "video_url": lipsync_result['video_url'],
-                            "local_path": lipsync_result['local_path'],
-                            "text": lipsync_result['text'],
-                            "voice_id": lipsync_result['voice_id']
-                        }
+                        f"Successfully created {len(lipsync_data['lipsync_videos'])} lipsynced versions!",
+                        data=lipsync_data
                     )
                 else:
+                    # Collect error messages
+                    error_messages = []
+                    for result in lipsync_result['lipsync_results']:
+                        if not result['success']:
+                            error_messages.append(f"Text {result['id']}: {result.get('error', 'Unknown error')}")
+                    
                     yield self.emit_step(
                         "Apply Lipsync",
                         "error",
-                        f"Lipsync failed: {lipsync_result.get('error', 'Unknown error')}"
+                        f"Lipsync failed: {'; '.join(error_messages)}"
                     )
             else:
                 yield self.emit_step(
