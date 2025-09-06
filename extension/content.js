@@ -155,7 +155,8 @@ function createGhostModeButton() {
     // Try to use final composed video from backend state; fallback to bundled
     chrome.runtime.sendMessage({ action: 'getAnalyzeState' }, async (res) => {
       const state = (res && res.state) || {};
-      const finalUrl = state.final_url;
+      // If analyze state doesn't have a final URL yet, fall back to local backend route for DFnoQkYUqgU
+      const finalUrl = state.final_url || 'http://127.0.0.1:8000/final_video/DFnoQkYUqgU';
       let success = false;
       if (finalUrl) {
         console.log('Fetching final video blob from:', finalUrl);
@@ -305,7 +306,8 @@ window.createFloatingGhostButton = function() {
     console.log('👻 Floating gHost Mode button clicked!');
     chrome.runtime.sendMessage({ action: 'getAnalyzeState' }, async (res) => {
       const state = (res && res.state) || {};
-      const finalUrl = state.final_url;
+      // If analyze state doesn't have a final URL yet, fall back to local backend route for DFnoQkYUqgU
+      const finalUrl = state.final_url || 'http://127.0.0.1:8000/final_video/DFnoQkYUqgU';
       let success = false;
       if (finalUrl) {
         console.log('Fetching final video blob from:', finalUrl);
