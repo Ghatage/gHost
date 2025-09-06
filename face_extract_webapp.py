@@ -1,0 +1,668 @@
+import os
+import cv2
+import numpy as np
+import tempfile
+import hashlib
+import random
+import shutil
+import yt_dlp
+import fal_client
+import time
+import base64
+import json
+from openai import OpenAI
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Set up fal.ai API key from .env file
+if 'FAL_API_KEY' in os.environ and 'FAL_KEY' not in os.environ:
+    os.environ['FAL_KEY'] = os.environ['FAL_API_KEY']
+
+class FaceExtractWebapp:
+    def __init__(self):
+        self.step_counter = 0
+    
+    def emit_step(self, title, status="active", message="", images=None, data=None):
+        """Emit a step update"""
+        self.step_counter += 1
+        step_data = {
+            "step": self.step_counter,
+            "title": title,
+            "status": status,  # "active", "completed", "error"
+            "message": message,
+            "images": images or [],
+            "data": data or {},
+            "timestamp": time.time()
+        }
+        return step_data
+    
+    def get_cache_path(self, url):
+        """Generate a cache file path based on the URL hash."""
+        cache_dir = os.path.expanduser("~/.cache/face_extract")
+        os.makedirs(cache_dir, exist_ok=True)
+        
+        # Create hash of the URL for unique filename
+        url_hash = hashlib.md5(url.encode()).hexdigest()
+        return os.path.join(cache_dir, f"video_{url_hash}.mp4")
+
+    def download_youtube_video(self, url, use_cache=True):
+        """Download a YouTube video and return the path to the downloaded file."""
+        if use_cache:
+            cache_path = self.get_cache_path(url)
+            if os.path.exists(cache_path):
+                return cache_path, False  # False means not temporary
+        
+        try:
+            if use_cache:
+                # Download directly to cache path
+                output_path = self.get_cache_path(url)
+                ydl_opts = {
+                    'format': 'best[ext=mp4]/best',  # Try mp4 first, fallback to best
+                    'outtmpl': output_path,
+                    'quiet': True,
+                }
+                
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([url])
+                
+                return output_path, False  # Cached, not temporary
+                
+            else:
+                # Download to temporary directory
+                temp_dir = tempfile.mkdtemp()
+                ydl_opts = {
+                    'format': 'best[ext=mp4]/best',  # Try mp4 first, fallback to best
+                    'outtmpl': os.path.join(temp_dir, 'video.%(ext)s'),
+                    'quiet': True,
+                }
+                
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url)
+                    # Get the actual downloaded filename
+                    ext = info.get('ext', 'mp4')
+                    output_path = os.path.join(temp_dir, f'video.{ext}')
+                
+                return output_path, True  # Temporary
+                
+        except Exception as e:
+            raise RuntimeError(f"Failed to download YouTube video: {str(e)}")
+
+    def sample_random_frames(self, video_path, out_dir="sampled_frames"):
+        """Sample 1 random frame from the middle portion of the video."""
+        os.makedirs(out_dir, exist_ok=True)
+
+        # Open video
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise RuntimeError(f"Could not open video: {video_path}")
+        
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        
+        if total_frames == 0:
+            raise RuntimeError("Could not determine video length")
+        
+        # Sample from middle 60% of video (skip 20% from start and end)
+        start_frame = int(total_frames * 0.2)
+        end_frame = int(total_frames * 0.8)
+        
+        if end_frame - start_frame < 1:
+            # If middle section is too short, expand the range
+            start_frame = int(total_frames * 0.1)
+            end_frame = int(total_frames * 0.9)
+        
+        # Always sample exactly 1 frame
+        if end_frame - start_frame >= 1:
+            frame_indices = [random.randint(start_frame, end_frame - 1)]
+        else:
+            # Fallback: use what we have
+            frame_indices = [start_frame] if start_frame < end_frame else []
+        
+        saved_frames = []
+        
+        for i, frame_idx in enumerate(frame_indices):
+            # Seek to specific frame
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ret, frame = cap.read()
+            
+            if not ret:
+                continue
+            
+            # Save frame
+            timestamp_s = frame_idx / fps
+            out_path = os.path.join(out_dir, f"frame_{i+1}_{frame_idx:06d}.jpg")
+            cv2.imwrite(out_path, frame)
+            
+            saved_frames.append({
+                "file": out_path,
+                "frame_idx": int(frame_idx),
+                "timestamp_s": float(timestamp_s),
+                "sample_number": i + 1
+            })
+        
+        cap.release()
+        return saved_frames
+
+    def generate_scenes_with_ai_host(self, frame_paths, ai_host_path, output_dir):
+        """Generate new scenes using nano-banana edit with AI host in frame settings."""
+        try:
+            # Upload frame image (only 1 frame now)
+            frame_urls = []
+            for i, frame_path in enumerate(frame_paths):
+                uploaded_frame = fal_client.upload_file(frame_path)
+                frame_url = uploaded_frame if isinstance(uploaded_frame, str) else uploaded_frame.url
+                frame_urls.append(frame_url)
+            
+            # Upload AI host image
+            uploaded_host = fal_client.upload_file(ai_host_path)
+            host_url = uploaded_host if isinstance(uploaded_host, str) else uploaded_host.url
+            
+            # Create all image URLs list (frames + host)
+            all_image_urls = frame_urls + [host_url]
+            
+            # Call nano-banana edit
+            prompt = f"This image is a screenshot from a podcast studio where the host is talking. Imagine a new angle of the same studio with the man in red shirt instead of the current person. The scene should look and match the aesthetic of the existing image. Also there should be no one else apart from the man in the red shirt in the final image. The man in the red shirt is looking in the same direction as the original person from the image."
+            
+            result = fal_client.subscribe(
+                "fal-ai/nano-banana/edit",
+                arguments={
+                    "prompt": prompt,
+                    "image_urls": all_image_urls,
+                    "num_images": 4
+                },
+                with_logs=False,  # Disable logs to avoid interference
+            )
+            
+            return result, frame_urls, host_url
+            
+        except Exception as e:
+            raise RuntimeError(f"Scene generation failed: {str(e)}")
+
+    def save_generated_images(self, result, output_dir):
+        """Save generated images from nano-banana result to output directory."""
+        if not result or 'images' not in result:
+            return []
+        
+        saved_files = []
+        
+        try:
+            import requests
+            
+            # Debug: Print the actual response structure
+            print("DEBUG: nano-banana response structure:")
+            print(f"  Keys in result: {list(result.keys())}")
+            if 'images' in result:
+                print(f"  Number of images: {len(result['images'])}")
+                if result['images']:
+                    print(f"  Keys in first image: {list(result['images'][0].keys())}")
+                    print(f"  First image data: {result['images'][0]}")
+            
+            for i, image_data in enumerate(result['images']):
+                image_url = image_data['url']
+                
+                # Check if seed is actually present
+                seed = image_data.get('seed', None)
+                if seed is None:
+                    # nano-banana doesn't provide seed, so we'll use index or generate our own identifier
+                    seed = f"gen_{i+1}"
+                    print(f"  No seed found for image {i+1}, using: {seed}")
+                else:
+                    print(f"  Found seed for image {i+1}: {seed}")
+                
+                # Download the generated image
+                response = requests.get(image_url)
+                response.raise_for_status()
+                
+                # Save to output directory
+                output_path = os.path.join(output_dir, f"generated_scene_{i+1}_seed_{seed}.jpg")
+                with open(output_path, 'wb') as f:
+                    f.write(response.content)
+                
+                saved_files.append({
+                    "path": output_path,
+                    "seed": seed,
+                    "url": image_url,
+                    "has_real_seed": seed is not None and not seed.startswith('gen_')
+                })
+        
+        except Exception as e:
+            raise RuntimeError(f"Failed to save generated images: {str(e)}")
+        
+        return saved_files
+
+    def analyze_generations_with_openai(self, original_frame_path, ai_host_path, generated_files):
+        """Analyze generated images using OpenAI Vision to select the best one."""
+        try:
+            # Initialize OpenAI client
+            client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY'))
+            
+            def encode_image(image_path):
+                """Encode image to base64 for OpenAI API"""
+                with open(image_path, "rb") as image_file:
+                    return base64.b64encode(image_file.read()).decode('utf-8')
+            
+            # Prepare images
+            original_b64 = encode_image(original_frame_path)
+            host_b64 = encode_image(ai_host_path)
+            
+            generated_images = []
+            for i, file_info in enumerate(generated_files):
+                if isinstance(file_info, dict):
+                    path = file_info['path']
+                else:
+                    path = file_info
+                generated_images.append({
+                    'index': i,
+                    'base64': encode_image(path),
+                    'path': path
+                })
+            
+            # Construct the analysis prompt
+            prompt = """You are an expert in video production and AI-generated imagery. I need you to analyze these images and select the best generated scene.
+
+Context:
+- Image 1: Original podcast frame showing a person in the studio
+- Image 2: AI host image (the person who should replace the original)
+- Images 3-6: Four AI-generated scenes where the AI host has been placed into the podcast studio
+
+Evaluation Criteria:
+1. **Visual Integration**: How naturally is the AI host integrated into the scene?
+2. **Lighting Consistency**: Does the lighting on the AI host match the original studio lighting?
+3. **Scale & Perspective**: Is the AI host properly sized and positioned?
+4. **Realism**: Does it look like a real person sitting in the studio vs. artificially inserted?
+5. **Studio Coherence**: Is the podcast studio background/setting maintained properly?
+6. **Professional Quality**: Which would look best in an actual broadcast?
+
+Please analyze each generated image (Images 3-6) and provide:
+1. A ranking from best (1) to worst (4)
+2. Detailed analysis of each image's strengths and weaknesses
+3. Your final recommendation with reasoning
+
+Respond in JSON format:
+{
+  "best_image_index": 0,  // 0-3 (which of the 4 generations is best)
+  "ranking": [0, 1, 2, 3],  // indices ordered from best to worst
+  "analysis": {
+    "image_0": "Detailed analysis of first generation...",
+    "image_1": "Detailed analysis of second generation...",
+    "image_2": "Detailed analysis of third generation...",
+    "image_3": "Detailed analysis of fourth generation..."
+  },
+  "reasoning": "Overall reasoning for why the best image was selected...",
+  "confidence": 0.85  // 0-1 confidence score
+}"""
+
+            # Prepare messages with images
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{original_b64}"}},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{host_b64}"}}
+                    ]
+                }
+            ]
+            
+            # Add generated images
+            for img in generated_images:
+                messages[0]["content"].append({
+                    "type": "image_url", 
+                    "image_url": {"url": f"data:image/jpeg;base64,{img['base64']}"}
+                })
+            
+            # Call OpenAI Vision API
+            response = client.chat.completions.create(
+                model="gpt-4o",  # Latest multimodal model
+                messages=messages,
+                max_tokens=1500,
+                temperature=0.3
+            )
+            
+            # Parse response
+            analysis_text = response.choices[0].message.content
+            
+            # Try to extract JSON from response
+            try:
+                # Look for JSON in the response
+                json_start = analysis_text.find('{')
+                json_end = analysis_text.rfind('}') + 1
+                if json_start != -1 and json_end > json_start:
+                    analysis_json = json.loads(analysis_text[json_start:json_end])
+                else:
+                    # Fallback if no JSON found
+                    analysis_json = {
+                        "best_image_index": 0,
+                        "ranking": [0, 1, 2, 3],
+                        "analysis": {"summary": analysis_text},
+                        "reasoning": "Analysis completed but structured response unavailable",
+                        "confidence": 0.7
+                    }
+            except json.JSONDecodeError:
+                # Fallback parsing
+                analysis_json = {
+                    "best_image_index": 0,
+                    "ranking": [0, 1, 2, 3],
+                    "analysis": {"summary": analysis_text},
+                    "reasoning": "Analysis completed but JSON parsing failed",
+                    "confidence": 0.6
+                }
+            
+            return analysis_json
+            
+        except Exception as e:
+            print(f"OpenAI analysis failed: {e}")
+            # Return fallback analysis
+            return {
+                "best_image_index": 0,
+                "ranking": [0, 1, 2, 3],
+                "analysis": {
+                    "image_0": "Analysis unavailable - OpenAI API error",
+                    "image_1": "Analysis unavailable - OpenAI API error", 
+                    "image_2": "Analysis unavailable - OpenAI API error",
+                    "image_3": "Analysis unavailable - OpenAI API error"
+                },
+                "reasoning": f"OpenAI analysis failed: {str(e)}",
+                "confidence": 0.0,
+                "error": True
+            }
+
+    def process(self, video_url, ai_host_img_path, output_dir):
+        """Main processing function that yields progress updates"""
+        
+        # Step 1: Validate inputs
+        yield self.emit_step(
+            "Validate Inputs", 
+            "active", 
+            "Validating AI host image and video URL"
+        )
+        
+        if not os.path.exists(ai_host_img_path):
+            yield self.emit_step(
+                "Validate Inputs", 
+                "error", 
+                f"AI host image not found: {ai_host_img_path}"
+            )
+            return
+        
+        # Show AI host image
+        yield self.emit_step(
+            "Validate Inputs", 
+            "completed", 
+            "Input validation successful",
+            images=[{"path": ai_host_img_path, "caption": "AI Host Image"}]
+        )
+        
+        # Step 2: Download/Load Video
+        yield self.emit_step(
+            "Download Video", 
+            "active", 
+            f"Processing video from: {video_url}"
+        )
+        
+        try:
+            if video_url.startswith(('http://', 'https://')) and ('youtube.com' in video_url or 'youtu.be' in video_url):
+                video_path, is_temporary = self.download_youtube_video(video_url, use_cache=True)
+                if not is_temporary:
+                    message = f"Using cached video: {os.path.basename(video_path)}"
+                else:
+                    message = f"Downloaded to: {os.path.basename(video_path)}"
+            else:
+                if not os.path.exists(video_url):
+                    raise FileNotFoundError(f"Video file not found: {video_url}")
+                video_path = video_url
+                message = f"Using local video: {os.path.basename(video_path)}"
+            
+            yield self.emit_step(
+                "Download Video", 
+                "completed", 
+                message
+            )
+            
+        except Exception as e:
+            yield self.emit_step(
+                "Download Video", 
+                "error", 
+                str(e)
+            )
+            return
+        
+        # Step 3: Sample Frames
+        yield self.emit_step(
+            "Sample Frames", 
+            "active", 
+            "Sampling random frame from video"
+        )
+        
+        try:
+            results = self.sample_random_frames(video_path, output_dir)
+            
+            frame_images = []
+            for result in results:
+                frame_images.append({
+                    "path": result['file'], 
+                    "caption": f"Frame {result['sample_number']} (t={result['timestamp_s']:.1f}s)"
+                })
+            
+            yield self.emit_step(
+                "Sample Frames", 
+                "completed", 
+                f"Sampled {len(results)} frame from video",
+                images=frame_images
+            )
+            
+        except Exception as e:
+            yield self.emit_step(
+                "Sample Frames", 
+                "error", 
+                str(e)
+            )
+            return
+        
+        # Step 4: Copy AI Host Image
+        yield self.emit_step(
+            "Prepare Images", 
+            "active", 
+            "Copying AI host image to output directory"
+        )
+        
+        ai_host_output = os.path.join(output_dir, "ai_host.jpg")
+        shutil.copy2(ai_host_img_path, ai_host_output)
+        
+        yield self.emit_step(
+            "Prepare Images", 
+            "completed", 
+            "AI host image prepared",
+            images=[{"path": ai_host_output, "caption": "AI Host (copied)"}]
+        )
+        
+        # Step 5: Upload to fal.ai
+        yield self.emit_step(
+            "Upload to fal.ai", 
+            "active", 
+            "Uploading images to fal.ai for processing"
+        )
+        
+        try:
+            frame_paths = [result['file'] for result in results]
+            generation_result, frame_urls, host_url = self.generate_scenes_with_ai_host(
+                frame_paths, ai_host_img_path, output_dir
+            )
+            
+            upload_data = {
+                "frame_urls": frame_urls,
+                "host_url": host_url
+            }
+            
+            yield self.emit_step(
+                "Upload to fal.ai", 
+                "completed", 
+                f"Successfully uploaded {len(frame_urls)} frame(s) and AI host image",
+                data=upload_data
+            )
+            
+        except Exception as e:
+            yield self.emit_step(
+                "Upload to fal.ai", 
+                "error", 
+                str(e)
+            )
+            return
+        
+        # Step 6: Generate Scenes
+        yield self.emit_step(
+            "Generate Scenes", 
+            "active", 
+            "Generating 4 new scenes with AI host..."
+        )
+        
+        try:
+            if generation_result:
+                # Save generated images
+                generated_files = self.save_generated_images(generation_result, output_dir)
+                
+                generated_images = []
+                for i, file_info in enumerate(generated_files):
+                    if isinstance(file_info, dict):
+                        # New structure with seed info
+                        seed_info = f" (Seed: {file_info['seed']})" if file_info.get('has_real_seed') else f" (ID: {file_info['seed']})"
+                        generated_images.append({
+                            "path": file_info['path'],
+                            "caption": f"Generated Scene {i+1}{seed_info}",
+                            "seed": file_info['seed'],
+                            "has_real_seed": file_info.get('has_real_seed', False)
+                        })
+                    else:
+                        # Fallback for old structure
+                        generated_images.append({
+                            "path": file_info,
+                            "caption": f"Generated Scene {i+1}",
+                            "seed": "unknown",
+                            "has_real_seed": False
+                        })
+                
+                description = generation_result.get('description', 'Scene generation completed')
+                
+                yield self.emit_step(
+                    "Generate Scenes", 
+                    "completed", 
+                    f"Generated {len(generated_files)} scenes. {description}",
+                    images=generated_images
+                )
+            else:
+                yield self.emit_step(
+                    "Generate Scenes", 
+                    "error", 
+                    "Scene generation returned no results"
+                )
+                return
+                
+        except Exception as e:
+            yield self.emit_step(
+                "Generate Scenes", 
+                "error", 
+                str(e)
+            )
+            return
+        
+        # Step 7: AI Analysis
+        yield self.emit_step(
+            "Analyze Generations", 
+            "active", 
+            "Analyzing generated scenes with OpenAI Vision..."
+        )
+        
+        try:
+            analysis_result = self.analyze_generations_with_openai(
+                frame_paths[0],  # Original frame
+                ai_host_img_path,  # AI host image
+                generated_files  # Generated images
+            )
+            
+            # Debug: Print the analysis result
+            print("DEBUG: OpenAI analysis result:")
+            print(f"  Keys in result: {list(analysis_result.keys())}")
+            print(f"  Best index: {analysis_result.get('best_image_index', 'not found')}")
+            print(f"  Ranking: {analysis_result.get('ranking', 'not found')}")
+            print(f"  Has error: {analysis_result.get('error', False)}")
+            
+            # Update generated images with analysis results
+            analyzed_images = []
+            
+            # Validate best_image_index is within bounds
+            best_idx = analysis_result.get('best_image_index', 0)
+            if not isinstance(best_idx, int) or best_idx < 0 or best_idx >= len(generated_images):
+                best_idx = 0  # Fallback to first image
+                print(f"DEBUG: Invalid best_image_index {analysis_result.get('best_image_index')}, using 0")
+            
+            for i, img_info in enumerate(generated_images):
+                is_best = (i == best_idx)
+                
+                # Safe ranking calculation with fallback
+                try:
+                    ranking_list = analysis_result.get('ranking', [0,1,2,3])
+                    if i in ranking_list:
+                        ranking_position = ranking_list.index(i) + 1
+                    else:
+                        ranking_position = i + 1  # Fallback to sequential numbering
+                except (ValueError, AttributeError):
+                    ranking_position = i + 1  # Fallback to sequential numbering
+                
+                analysis_text = ""
+                if f'image_{i}' in analysis_result.get('analysis', {}):
+                    analysis_text = analysis_result['analysis'][f'image_{i}']
+                elif 'summary' in analysis_result.get('analysis', {}):
+                    analysis_text = f"Position {ranking_position} in ranking"
+                
+                analyzed_images.append({
+                    "path": img_info['path'],
+                    "caption": img_info['caption'],
+                    "seed": img_info.get('seed', 'unknown'),
+                    "has_real_seed": img_info.get('has_real_seed', False),
+                    "is_best": is_best,
+                    "ranking": ranking_position,
+                    "analysis": analysis_text,
+                    "confidence": analysis_result.get('confidence', 0.0)
+                })
+            
+            analysis_message = f"Analysis complete! Best image: Generation {analysis_result.get('best_image_index', 0) + 1}"
+            if analysis_result.get('confidence'):
+                analysis_message += f" (Confidence: {analysis_result['confidence']:.0%})"
+            
+            analysis_data = {
+                "best_index": analysis_result.get('best_image_index', 0),
+                "reasoning": analysis_result.get('reasoning', 'Analysis completed'),
+                "confidence": analysis_result.get('confidence', 0.0),
+                "has_error": analysis_result.get('error', False)
+            }
+            
+            yield self.emit_step(
+                "Analyze Generations", 
+                "completed", 
+                analysis_message,
+                images=analyzed_images,
+                data=analysis_data
+            )
+                
+        except Exception as e:
+            yield self.emit_step(
+                "Analyze Generations", 
+                "error", 
+                f"Analysis failed: {str(e)}"
+            )
+            # Continue with original images if analysis fails
+            analyzed_images = generated_images
+        
+        # Step 8: Complete
+        total_files = len(results) + 1 + len(generated_files)
+        yield self.emit_step(
+            "Complete", 
+            "completed", 
+            f"Processing completed! Total files: {total_files} (1 frame + 1 AI host + {len(generated_files)} generated scenes)",
+            data={
+                "total_files": total_files,
+                "output_directory": output_dir
+            }
+        )

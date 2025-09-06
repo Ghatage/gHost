@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Face Extract - AI Scene Generator</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <h1>🎬 AI Scene Generator</h1>
+            <p>Generate new podcast scenes with your AI host</p>
+        </header>
+
+        <div class="controls">
+            <button id="startBtn" class="start-btn">
+                <span class="btn-icon">▶️</span>
+                Start Processing
+            </button>
+            <div id="status" class="status">Ready to start</div>
+        </div>
+
+        <div class="stepper-container">
+            <div id="stepper" class="stepper">
+                <!-- Steps will be dynamically added here -->
+            </div>
+        </div>
+
+        <div id="completion-summary" class="completion-summary" style="display: none;">
+            <h3>🎉 Processing Complete!</h3>
+            <p id="completion-text"></p>
+            <div id="all-results" class="all-results"></div>
+        </div>
+    </div>
+
+    <script>
+        let eventSource = null;
+        let currentSteps = {};
+
+        const startBtn = document.getElementById('startBtn');
+        const status = document.getElementById('status');
+        const stepper = document.getElementById('stepper');
+        const completionSummary = document.getElementById('completion-summary');
+        const completionText = document.getElementById('completion-text');
+        const allResults = document.getElementById('all-results');
+
+        startBtn.addEventListener('click', startProcessing);
+
+        function startProcessing() {
+            startBtn.disabled = true;
+            startBtn.innerHTML = '<span class="btn-icon">⏳</span> Processing...';
+            status.textContent = 'Initializing...';
+            
+            // Clear previous results
+            stepper.innerHTML = '';
+            currentSteps = {};
+            completionSummary.style.display = 'none';
+
+            // Start the backend processing
+            fetch('/start')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'started') {
+                        connectToEventStream();
+                    } else if (data.status === 'already_running') {
+                        status.textContent = 'Processing already in progress...';
+                        connectToEventStream();
+                    }
+                })
+                .catch(error => {
+                    console.error('Error starting process:', error);
+                    status.textContent = 'Error starting process';
+                    resetUI();
+                });
+        }
+
+        function connectToEventStream() {
+            eventSource = new EventSource('/events');
+            
+            eventSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                
+                if (data.type === 'complete') {
+                    handleProcessingComplete();
+                    return;
+                }
+                
+                handleStepUpdate(data);
+            };
+
+            eventSource.onerror = function(event) {
+                console.error('EventSource failed:', event);
+                status.textContent = 'Connection error - retrying...';
+                
+                setTimeout(() => {
+                    if (eventSource.readyState === EventSource.CLOSED) {
+                        connectToEventStream();
+                    }
+                }, 2000);
+            };
+        }
+
+        function handleStepUpdate(stepData) {
+            const stepId = `step-${stepData.step}`;
+            
+            // Update or create step
+            if (currentSteps[stepId]) {
+                updateStep(stepId, stepData);
+            } else {
+                createStep(stepId, stepData);
+                currentSteps[stepId] = stepData;
+            }
+            
+            // Update status
+            if (stepData.status === 'active') {
+                status.textContent = `${stepData.title}: ${stepData.message}`;
+            } else if (stepData.status === 'completed') {
+                status.textContent = `✅ ${stepData.title} completed`;
+            } else if (stepData.status === 'error') {
+                status.textContent = `❌ Error in ${stepData.title}`;
+            }
+        }
+
+        function createStep(stepId, stepData) {
+            const stepElement = document.createElement('div');
+            stepElement.id = stepId;
+            stepElement.className = `step step-${stepData.status}`;
+            
+            stepElement.innerHTML = `
+                <div class="step-indicator">
+                    <div class="step-number">${stepData.step}</div>
+                    <div class="step-status-icon"></div>
+                </div>
+                <div class="step-content">
+                    <h3 class="step-title">${stepData.title}</h3>
+                    <div class="step-message">${stepData.message}</div>
+                    <div class="step-images"></div>
+                    <div class="step-data"></div>
+                </div>
+                <div class="step-connector"></div>
+            `;
+            
+            stepper.appendChild(stepElement);
+            updateStepContent(stepId, stepData);
+            
+            // Scroll into view
+            stepElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+
+        function updateStep(stepId, stepData) {
+            const stepElement = document.getElementById(stepId);
+            if (!stepElement) return;
+            
+            // Update classes
+            stepElement.className = `step step-${stepData.status}`;
+            
+            // Update content
+            updateStepContent(stepId, stepData);
+        }
+
+        function updateStepContent(stepId, stepData) {
+            const stepElement = document.getElementById(stepId);
+            if (!stepElement) return;
+            
+            const messageDiv = stepElement.querySelector('.step-message');
+            const imagesDiv = stepElement.querySelector('.step-images');
+            const dataDiv = stepElement.querySelector('.step-data');
+            
+            messageDiv.textContent = stepData.message;
+            
+            // Update images
+            if (stepData.images && stepData.images.length > 0) {
+                imagesDiv.innerHTML = stepData.images.map(img => {
+                    const seedBadge = img.seed && img.seed !== 'unknown' ? 
+                        `<span class="seed-badge ${img.has_real_seed ? 'real-seed' : 'generated-id'}">${img.has_real_seed ? 'Seed: ' + img.seed : 'ID: ' + img.seed}</span>` : '';
+                    
+                    // Analysis badges and styling
+                    const bestBadge = img.is_best ? '<span class="best-badge">🏆 BEST</span>' : '';
+                    const rankingBadge = img.ranking ? `<span class="ranking-badge">Rank #${img.ranking}</span>` : '';
+                    const analysisText = img.analysis ? `<div class="analysis-text">${img.analysis}</div>` : '';
+                    const confidenceBadge = img.confidence ? `<span class="confidence-badge">${(img.confidence * 100).toFixed(0)}% confidence</span>` : '';
+                    
+                    const imageItemClass = img.is_best ? 'image-item best-image' : 'image-item';
+                    
+                    return `
+                        <div class="${imageItemClass}">
+                            <img src="/images/${img.path.split('/').pop()}" alt="${img.caption}" />
+                            <span class="image-caption">${img.caption}</span>
+                            ${seedBadge}
+                            ${bestBadge}
+                            ${rankingBadge}
+                            ${confidenceBadge}
+                            ${analysisText}
+                        </div>
+                    `;
+                }).join('');
+                imagesDiv.style.display = 'block';
+            } else {
+                imagesDiv.style.display = 'none';
+            }
+            
+            // Update data
+            if (stepData.data && Object.keys(stepData.data).length > 0) {
+                const dataItems = Object.entries(stepData.data).map(([key, value]) => {
+                    if (key === 'frame_urls' || key === 'host_url') {
+                        return `<div class="data-item"><strong>${key}:</strong> <span class="url-preview">${Array.isArray(value) ? value.length + ' URLs' : 'URL uploaded'}</span></div>`;
+                    } else if (key === 'reasoning') {
+                        return `<div class="data-item analysis-reasoning"><strong>AI Analysis:</strong> <div class="reasoning-text">${value}</div></div>`;
+                    } else if (key === 'best_index') {
+                        return `<div class="data-item"><strong>Recommended Image:</strong> Generation ${parseInt(value) + 1}</div>`;
+                    } else if (key === 'confidence') {
+                        return `<div class="data-item"><strong>Confidence:</strong> ${(parseFloat(value) * 100).toFixed(0)}%</div>`;
+                    }
+                    return `<div class="data-item"><strong>${key}:</strong> ${value}</div>`;
+                }).join('');
+                
+                dataDiv.innerHTML = `<div class="step-data-content">${dataItems}</div>`;
+                dataDiv.style.display = 'block';
+            } else {
+                dataDiv.style.display = 'none';
+            }
+        }
+
+        function handleProcessingComplete() {
+            eventSource.close();
+            resetUI();
+            
+            status.textContent = '🎉 All processing completed!';
+            
+            // Show completion summary
+            completionSummary.style.display = 'block';
+            completionText.textContent = 'Your AI scenes have been generated successfully!';
+            
+            // Collect all generated images for final display
+            const allImages = [];
+            Object.values(currentSteps).forEach(step => {
+                if (step.images) {
+                    step.images.forEach(img => {
+                        if (img.path.includes('generated_scene')) {
+                            allImages.push(img);
+                        }
+                    });
+                }
+            });
+            
+            if (allImages.length > 0) {
+                allResults.innerHTML = `
+                    <h4>Generated Scenes:</h4>
+                    <div class="final-gallery">
+                        ${allImages.map(img => {
+                            const seedInfo = img.seed && img.seed !== 'unknown' ? 
+                                `<div class="final-seed ${img.has_real_seed ? 'real-seed' : 'generated-id'}">${img.has_real_seed ? 'Seed: ' + img.seed : 'ID: ' + img.seed}</div>` : '';
+                            
+                            return `
+                                <div class="final-image">
+                                    <img src="/images/${img.path.split('/').pop()}" alt="${img.caption}" />
+                                    <span class="final-caption">${img.caption}</span>
+                                    ${seedInfo}
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                `;
+            }
+            
+            completionSummary.scrollIntoView({ behavior: 'smooth' });
+        }
+
+        function resetUI() {
+            startBtn.disabled = false;
+            startBtn.innerHTML = '<span class="btn-icon">▶️</span> Start Processing';
+        }
+
+        // Handle page visibility to reconnect if needed
+        document.addEventListener('visibilitychange', function() {
+            if (document.visibilityState === 'visible' && eventSource && eventSource.readyState === EventSource.CLOSED) {
+                // Check if processing is still active
+                fetch('/status')
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.active) {
+                            connectToEventStream();
+                        }
+                    });
+            }
+        });
+    </script>
+</body>
+</html>
