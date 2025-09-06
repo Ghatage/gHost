@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+yt-dlp
+requests
+pydantic
+python-dotenv
+assemblyai
+openai
