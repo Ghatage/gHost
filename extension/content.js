@@ -152,22 +152,42 @@ function createGhostModeButton() {
   // Add click handler
   ghostButton.onclick = () => {
     console.log('👻 gHost Mode button clicked!');
-    const success = replaceVideoWithLocal();
-    if (success) {
-      ghostButton.innerHTML = '✅ gHost This';
-      ghostButton.style.background = '#00ff00';
-      setTimeout(() => {
-        ghostButton.innerHTML = '👻 gHost This';
-        ghostButton.style.background = '#ff0000';
-      }, 2000);
-    } else {
-      ghostButton.innerHTML = '❌ Failed';
-      ghostButton.style.background = '#666';
-      setTimeout(() => {
-        ghostButton.innerHTML = '👻 gHost This';
-        ghostButton.style.background = '#ff0000';
-      }, 2000);
-    }
+    // Try to use final composed video from backend state; fallback to bundled
+    chrome.runtime.sendMessage({ action: 'getAnalyzeState' }, async (res) => {
+      const state = (res && res.state) || {};
+      const finalUrl = state.final_url;
+      let success = false;
+      if (finalUrl) {
+        console.log('Fetching final video blob from:', finalUrl);
+        try {
+          const r = await fetch(finalUrl);
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          const blob = await r.blob();
+          const url = URL.createObjectURL(blob);
+          success = replaceVideoWithLocal(url);
+        } catch (e) {
+          console.error('Failed fetching final video:', e);
+        }
+      }
+      if (!success) {
+        success = replaceVideoWithLocal();
+      }
+      if (success) {
+        ghostButton.innerHTML = '✅ gHost This';
+        ghostButton.style.background = '#00ff00';
+        setTimeout(() => {
+          ghostButton.innerHTML = '👻 gHost This';
+          ghostButton.style.background = '#ff0000';
+        }, 2000);
+      } else {
+        ghostButton.innerHTML = '❌ Failed';
+        ghostButton.style.background = '#666';
+        setTimeout(() => {
+          ghostButton.innerHTML = '👻 gHost This';
+          ghostButton.style.background = '#ff0000';
+        }, 2000);
+      }
+    });
   };
 
   // Insert the button next to the Share button when possible
@@ -283,22 +303,39 @@ window.createFloatingGhostButton = function() {
   // Add click handler
   ghostButton.onclick = () => {
     console.log('👻 Floating gHost Mode button clicked!');
-    const success = replaceVideoWithLocal();
-    if (success) {
-      ghostButton.innerHTML = '✅ gHost This';
-      ghostButton.style.background = '#00ff00';
-      setTimeout(() => {
-        ghostButton.innerHTML = '👻 gHost This';
-        ghostButton.style.background = '#ff0000';
-      }, 2000);
-    } else {
-      ghostButton.innerHTML = '❌ Failed';
-      ghostButton.style.background = '#666';
-      setTimeout(() => {
-        ghostButton.innerHTML = '👻 gHost This';
-        ghostButton.style.background = '#ff0000';
-      }, 2000);
-    }
+    chrome.runtime.sendMessage({ action: 'getAnalyzeState' }, async (res) => {
+      const state = (res && res.state) || {};
+      const finalUrl = state.final_url;
+      let success = false;
+      if (finalUrl) {
+        console.log('Fetching final video blob from:', finalUrl);
+        try {
+          const r = await fetch(finalUrl);
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          const blob = await r.blob();
+          const url = URL.createObjectURL(blob);
+          success = replaceVideoWithLocal(url);
+        } catch (e) {
+          console.error('Failed fetching final video:', e);
+        }
+      }
+      if (!success) success = replaceVideoWithLocal();
+      if (success) {
+        ghostButton.innerHTML = '✅ gHost This';
+        ghostButton.style.background = '#00ff00';
+        setTimeout(() => {
+          ghostButton.innerHTML = '👻 gHost This';
+          ghostButton.style.background = '#ff0000';
+        }, 2000);
+      } else {
+        ghostButton.innerHTML = '❌ Failed';
+        ghostButton.style.background = '#666';
+        setTimeout(() => {
+          ghostButton.innerHTML = '👻 gHost This';
+          ghostButton.style.background = '#ff0000';
+        }, 2000);
+      }
+    });
   };
 
   // Add to page
@@ -335,21 +372,37 @@ new MutationObserver(() => {
 // Listen for messages from popup (existing functionality)
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'replaceVideo') {
-    // Handle both base64 data from popup and bundled video
+    // If serverUrl provided, fetch and use blob URL to avoid mixed content issues
+    if (request.serverUrl) {
+      (async () => {
+        try {
+          console.log('Fetching server video for replacement:', request.serverUrl);
+          const r = await fetch(request.serverUrl);
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          const blob = await r.blob();
+          const url = URL.createObjectURL(blob);
+          const success = replaceVideoWithLocal(url);
+          sendResponse({ success });
+        } catch (e) {
+          console.error('Failed to fetch server video:', e);
+          const success = replaceVideoWithLocal();
+          sendResponse({ success, error: String(e) });
+        }
+      })();
+      return true; // keep message channel open for async response
+    }
+    // Fallbacks: use base64 data or packaged video
     let videoSrc;
     if (request.videoData && request.mimeType) {
-      // Use base64 data from user-selected file
       videoSrc = `data:${request.mimeType};base64,${request.videoData}`;
       console.log('Using user-selected video file');
     } else {
-      // Use bundled video file
       videoSrc = chrome.runtime.getURL('local_video.mp4');
       console.log('Using bundled local video');
     }
-
     const success = replaceVideoWithLocal(videoSrc);
-    sendResponse({success: success});
+    sendResponse({ success });
   } else {
-    sendResponse({success: false, error: 'Invalid request'});
+    sendResponse({ success: false, error: 'Invalid request' });
   }
 });

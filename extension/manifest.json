@@ -4,9 +4,16 @@
   "version": "1.0",
   "description": "Replaces the current YouTube video with a new one.",
   "permissions": ["activeTab", "storage"],
-  "host_permissions": ["https://www.youtube.com/*"],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
   "action": {
     "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
   },
   "content_scripts": [
     {

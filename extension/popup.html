@@ -15,7 +15,11 @@
   <div class="info">Select a video file or leave empty to use the bundled local_video.mp4</div>
   <input type="file" id="videoFile" accept="video/*">
   <label id="fileLabel">No video chosen (will use bundled video)</label>
-  <button id="replaceBtn">Replace Video</button>
+  <div style="display:flex; gap:8px;">
+    <button id="replaceBtn" style="flex:1;">Replace Video</button>
+    <button id="analyzeBtn" style="flex:1; background:#0d6efd">Initiate gHosting</button>
+  </div>
+  <pre id="analyzeOutput" style="margin-top:10px; max-height:220px; overflow:auto; white-space:pre-wrap; font-size:12px; display:none;"></pre>
   <script src="popup.js"></script>
 </body>
 </html>
