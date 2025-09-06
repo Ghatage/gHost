@@ -100,7 +100,8 @@ def generate_scenes_with_ai_host(frame_paths, ai_host_path, output_dir):
         
         # Call nano-banana edit
         #prompt = f"Generate a similar scene with the same aesthetic and lighting as the reference images, but place the person from the AI host image into this setting. Maintain the atmosphere and visual style of the original scene."
-        prompt = f"This image is a screenshot from a podcast studio where the host is talking. Imagine a new angle of the same studio with the man in the red shirt sitting at the table. The scene should look and match the aesthetic of the existing image. Also there should be no one else apart from the man in the red shirt in the final image. The man in the red shirt is looking in the same direction as the original person from the image."
+        #prompt = f"This image is a screenshot from a podcast studio where the host is talking. Imagine a new angle of the same studio with the man in the white shirt andgreen jacket sitting at the table. The scene should look and match the aesthetic of the existing image. Also there should be no one else apart from the man in the white shirt and green jacket in the final image. The man in the white shirt and green jacket is looking in the same direction as the original person from the image."
+        prompt = f"Imagine a new angle of the podcast studio from the first image but with the person with the white shirt and green jacket in the scene. No one else in the scene."
         
         print(f"\nGenerating 4 scenes with prompt: {prompt}")
         

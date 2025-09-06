@@ -104,6 +104,12 @@
         function handleStepUpdate(stepData) {
             const stepId = `step-${stepData.step}`;
             
+            // Handle parallel steps
+            if (stepData.is_parallel) {
+                handleParallelStep(stepData);
+                return;
+            }
+            
             // Update or create step
             if (currentSteps[stepId]) {
                 updateStep(stepId, stepData);
@@ -121,6 +127,108 @@
                 status.textContent = `❌ Error in ${stepData.title}`;
             }
         }
+
+        function handleParallelStep(stepData) {
+            const parallelContainerId = `parallel-container-${stepData.parallel_id}`;
+            const parallelStepId = `parallel-step-${stepData.parallel_id}-${stepData.parallel_index}`;
+            
+            // Create or get parallel container
+            let parallelContainer = document.getElementById(parallelContainerId);
+            if (!parallelContainer) {
+                parallelContainer = createParallelContainer(stepData.parallel_id);
+            }
+            
+            // Update or create parallel step
+            if (document.getElementById(parallelStepId)) {
+                updateParallelStep(parallelStepId, stepData);
+            } else {
+                createParallelStep(parallelContainer, parallelStepId, stepData);
+            }
+            
+            // Update status for parallel steps
+            if (stepData.status === 'active') {
+                status.textContent = `🔄 ${stepData.title}: ${stepData.message}`;
+            } else if (stepData.status === 'completed') {
+                status.textContent = `✅ ${stepData.title} completed`;
+            } else if (stepData.status === 'error') {
+                status.textContent = `❌ Error in ${stepData.title}`;
+            }
+        }
+
+        function createParallelContainer(parallelId) {
+            const container = document.createElement('div');
+            container.id = `parallel-container-${parallelId}`;
+            container.className = 'parallel-steps-container';
+            container.innerHTML = `
+                <div class="parallel-branches-wrapper">
+                    <div class="parallel-branches"></div>
+                </div>
+            `;
+            
+            stepper.appendChild(container);
+            return container;
+        }
+
+        function createParallelStep(parallelContainer, parallelStepId, stepData) {
+            const branchesWrapper = parallelContainer.querySelector('.parallel-branches');
+            
+            const parallelStep = document.createElement('div');
+            parallelStep.id = parallelStepId;
+            parallelStep.className = `parallel-branch parallel-branch-${stepData.status}`;
+            
+            parallelStep.innerHTML = `
+                <div class="parallel-step-indicator">
+                    <div class="parallel-step-number">${stepData.parallel_index + 1}</div>
+                    <div class="parallel-step-status-icon"></div>
+                </div>
+                <div class="parallel-step-content">
+                    <h4 class="parallel-step-title">${stepData.title}</h4>
+                    <div class="parallel-step-message">${stepData.message}</div>
+                    <div class="parallel-step-data"></div>
+                </div>
+            `;
+            
+            branchesWrapper.appendChild(parallelStep);
+            updateParallelStepContent(parallelStepId, stepData);
+        }
+
+        function updateParallelStep(parallelStepId, stepData) {
+            const parallelStep = document.getElementById(parallelStepId);
+            if (!parallelStep) return;
+            
+            parallelStep.className = `parallel-branch parallel-branch-${stepData.status}`;
+            updateParallelStepContent(parallelStepId, stepData);
+        }
+
+        function updateParallelStepContent(parallelStepId, stepData) {
+            const parallelStep = document.getElementById(parallelStepId);
+            if (!parallelStep) return;
+            
+            const messageDiv = parallelStep.querySelector('.parallel-step-message');
+            const dataDiv = parallelStep.querySelector('.parallel-step-data');
+            
+            messageDiv.textContent = stepData.message;
+            
+            // Update data (videos)
+            if (stepData.data && Object.keys(stepData.data).length > 0) {
+                const dataItems = Object.entries(stepData.data).map(([key, value]) => {
+                    if (key === 'video_url') {
+                        return `<div class="parallel-video-container"><video controls width="200" height="150"><source src="${value}" type="video/mp4">Your browser does not support the video tag.</video></div>`;
+                    } else if (key === 'animation_name') {
+                        return `<div class="animation-name">${value} Animation</div>`;
+                    } else if (key === 'duration') {
+                        return `<div class="animation-duration">${value}s</div>`;
+                    }
+                    return `<div class="parallel-data-item">${key}: ${value}</div>`;
+                }).join('');
+                
+                dataDiv.innerHTML = dataItems;
+                dataDiv.style.display = 'block';
+            } else {
+                dataDiv.style.display = 'none';
+            }
+        }
+
 
         function createStep(stepId, stepData) {
             const stepElement = document.createElement('div');
@@ -154,6 +262,7 @@
             
             // Update classes
             stepElement.className = `step step-${stepData.status}`;
+            
             
             // Update content
             updateStepContent(stepId, stepData);
@@ -200,7 +309,7 @@
                 imagesDiv.style.display = 'none';
             }
             
-            // Update data
+            // Update data (including lipsync video)
             if (stepData.data && Object.keys(stepData.data).length > 0) {
                 const dataItems = Object.entries(stepData.data).map(([key, value]) => {
                     if (key === 'frame_urls' || key === 'host_url') {
@@ -211,6 +320,21 @@
                         return `<div class="data-item"><strong>Recommended Image:</strong> Generation ${parseInt(value) + 1}</div>`;
                     } else if (key === 'confidence') {
                         return `<div class="data-item"><strong>Confidence:</strong> ${(parseFloat(value) * 100).toFixed(0)}%</div>`;
+                    } else if (key === 'video_url') {
+                        // Check if this is a lipsync video (has text and voice_id in same data)
+                        const isLipsyncVideo = stepData.data.text && stepData.data.voice_id;
+                        const videoLabel = isLipsyncVideo ? 'Lipsynced Video with Audio' : 'Generated Video';
+                        return `<div class="data-item video-container"><strong>${videoLabel}:</strong><br><video controls width="400" height="300"><source src="${value}" type="video/mp4">Your browser does not support the video tag.</video></div>`;
+                    } else if (key === 'text') {
+                        return `<div class="data-item"><strong>Spoken Text:</strong> <em>"${value}"</em></div>`;
+                    } else if (key === 'voice_id') {
+                        return `<div class="data-item"><strong>Voice:</strong> ${value}</div>`;
+                    } else if (key === 'local_path') {
+                        return ''; // Don't show local path in UI
+                    } else if (key === 'duration') {
+                        return `<div class="data-item"><strong>Duration:</strong> ${value} seconds</div>`;
+                    } else if (key === 'source_image') {
+                        return `<div class="data-item"><strong>Source:</strong> ${value}</div>`;
                     }
                     return `<div class="data-item"><strong>${key}:</strong> ${value}</div>`;
                 }).join('');
@@ -232,8 +356,11 @@
             completionSummary.style.display = 'block';
             completionText.textContent = 'Your AI scenes have been generated successfully!';
             
-            // Collect all generated images for final display
+            // Collect all generated images and videos for final display
             const allImages = [];
+            const allVideos = [];
+            let lipsyncVideo = null;
+            
             Object.values(currentSteps).forEach(step => {
                 if (step.images) {
                     step.images.forEach(img => {
@@ -242,11 +369,28 @@
                         }
                     });
                 }
+                
+                // Collect videos from parallel animations
+                if (step.data && step.data.all_videos) {
+                    allVideos.push(...step.data.all_videos);
+                }
+                
+                // Check for lipsync video
+                if (step.title === 'Apply Lipsync' && step.data && step.data.video_url) {
+                    lipsyncVideo = {
+                        video_url: step.data.video_url,
+                        text: step.data.text,
+                        voice_id: step.data.voice_id
+                    };
+                }
             });
             
+            let resultsHTML = '';
+            
+            // Show generated images
             if (allImages.length > 0) {
-                allResults.innerHTML = `
-                    <h4>Generated Scenes:</h4>
+                resultsHTML += `
+                    <h4>Generated Images:</h4>
                     <div class="final-gallery">
                         ${allImages.map(img => {
                             const seedInfo = img.seed && img.seed !== 'unknown' ? 
@@ -262,6 +406,46 @@
                         }).join('')}
                     </div>
                 `;
+            }
+            
+            // Show lipsynced video first if available
+            if (lipsyncVideo) {
+                resultsHTML += `
+                    <h4>🎤 Lipsynced Video with Audio:</h4>
+                    <div class="lipsync-video-container">
+                        <video controls width="500" height="375" autoplay>
+                            <source src="${lipsyncVideo.video_url}" type="video/mp4">
+                            Your browser does not support the video tag.
+                        </video>
+                        <div class="lipsync-info">
+                            <div class="lipsync-text"><strong>Spoken Text:</strong> <em>"${lipsyncVideo.text}"</em></div>
+                            <div class="lipsync-voice"><strong>Voice:</strong> ${lipsyncVideo.voice_id}</div>
+                        </div>
+                    </div>
+                `;
+            }
+            
+            // Show parallel animation videos
+            if (allVideos.length > 0) {
+                resultsHTML += `
+                    <h4>Animation Videos:</h4>
+                    <div class="final-video-gallery">
+                        ${allVideos.map(video => `
+                            <div class="final-video">
+                                <video controls width="300" height="225">
+                                    <source src="${video.video_url}" type="video/mp4">
+                                    Your browser does not support the video tag.
+                                </video>
+                                <div class="final-video-caption">${video.animation_name} Animation</div>
+                                <div class="final-video-duration">${video.duration} seconds</div>
+                            </div>
+                        `).join('')}
+                    </div>
+                `;
+            }
+            
+            if (resultsHTML) {
+                allResults.innerHTML = resultsHTML;
             }
             
             completionSummary.scrollIntoView({ behavior: 'smooth' });

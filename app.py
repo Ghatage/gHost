@@ -23,8 +23,9 @@ def process_video_task():
         processor = FaceExtractWebapp()
         
         # Hardcoded parameters for now - you can modify these
-        video_url = "https://www.youtube.com/watch?v=-i9AGk3DJ90"
-        ai_host_img = "./host.jpg"
+        # video_url = "https://www.youtube.com/watch?v=-i9AGk3DJ90"  # Old URL
+        video_url = "https://www.youtube.com/watch?v=DFnoQkYUqgU"
+        ai_host_img = "./host.png"
         output_dir = "sampled_frames"
         
         # Process and yield updates

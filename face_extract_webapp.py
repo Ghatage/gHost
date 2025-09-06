@@ -10,6 +10,7 @@ import fal_client
 import time
 import base64
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -23,18 +24,26 @@ if 'FAL_API_KEY' in os.environ and 'FAL_KEY' not in os.environ:
 class FaceExtractWebapp:
     def __init__(self):
         self.step_counter = 0
+        self.all_videos = []  # Store videos for lipsync step
     
-    def emit_step(self, title, status="active", message="", images=None, data=None):
+    def emit_step(self, title, status="active", message="", images=None, data=None, is_parallel=False, parallel_id=None, parallel_index=None, requires_action=False, action_buttons=None):
         """Emit a step update"""
-        self.step_counter += 1
+        if not is_parallel:
+            self.step_counter += 1
+        
         step_data = {
-            "step": self.step_counter,
+            "step": self.step_counter if not is_parallel else f"{self.step_counter}.{parallel_index}",
             "title": title,
-            "status": status,  # "active", "completed", "error"
+            "status": status,  # "active", "completed", "error", "waiting_action"
             "message": message,
             "images": images or [],
             "data": data or {},
-            "timestamp": time.time()
+            "timestamp": time.time(),
+            "is_parallel": is_parallel,
+            "parallel_id": parallel_id,
+            "parallel_index": parallel_index,
+            "requires_action": requires_action,
+            "action_buttons": action_buttons or []
         }
         return step_data
     
@@ -369,6 +378,214 @@ Respond in JSON format:
                 "error": True
             }
 
+    def animate_best_image_with_veo2(self, image_path, prompt="The person at the table is talking and interacting intently.", duration=5):
+        """Animate the best selected image using VEO2 image-to-video model.
+        
+        Args:
+            image_path (str): Path to the image to animate
+            prompt (str): Text prompt describing the animation
+            duration (int): Video duration in seconds (default: 5)
+            
+        Returns:
+            dict: VEO2 result containing video URL and metadata
+        """
+        try:
+            # Upload the best image to fal.ai
+            uploaded_image = fal_client.upload_file(image_path)
+            image_url = uploaded_image if isinstance(uploaded_image, str) else uploaded_image.url
+            
+            # Define queue update handler for progress logging
+            def on_queue_update(update):
+                if isinstance(update, fal_client.InProgress):
+                    for log in update.logs:
+                        print(f"VEO2 Progress: {log['message']}")
+            
+            # Call VEO2 image-to-video model
+            result = fal_client.subscribe(
+                "fal-ai/veo2/image-to-video",
+                arguments={
+                    "prompt": prompt,
+                    "image_url": image_url,
+                    "duration": duration
+                },
+                with_logs=True,
+                on_queue_update=on_queue_update,
+            )
+            
+            return {
+                "success": True,
+                "video_result": result,
+                "input_image_url": image_url,
+                "prompt": prompt,
+                "duration": duration
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "input_image_path": image_path,
+                "prompt": prompt,
+                "duration": duration
+            }
+
+
+    def apply_lipsync_to_talking_video(self, talking_video_url, output_dir):
+        """Apply lipsync to the talking animation video using Kling API.
+        
+        Args:
+            talking_video_url (str): URL of the talking animation video from VEO2
+            output_dir (str): Directory to save results
+            
+        Returns:
+            dict: Result containing the lipsynced video URL and metadata
+        """
+        try:
+            # The text to be spoken
+            text = "Simply put, the idea shifts from monthly payments to giving everyone ownership shares and real decision-making power."
+            text2 = "In short, distributing AI-created value can be designed as a global system, not limited by where technology originated."
+            
+            # Define queue update handler for progress logging
+            def on_queue_update(update):
+                if isinstance(update, fal_client.InProgress):
+                    for log in update.logs:
+                        print(f"Lipsync Progress: {log['message']}")
+            
+            # Call Kling lipsync API with correct endpoint
+            result = fal_client.subscribe(
+                "fal-ai/kling-video/lipsync/text-to-video",
+                arguments={
+                    "video_url": talking_video_url,
+                    "text": text,
+                    "voice_id": "oversea_male1"  # Using oversea_male1 voice
+                },
+                with_logs=True,
+                on_queue_update=on_queue_update
+            )
+            
+            # Download the lipsynced video if successful
+            if result and 'video' in result:
+                import requests
+                video_url = result['video']['url'] if isinstance(result['video'], dict) else result['video']
+                
+                # Download and save the lipsynced video
+                response = requests.get(video_url)
+                response.raise_for_status()
+                
+                output_path = os.path.join(output_dir, "talking_with_lipsync.mp4")
+                with open(output_path, 'wb') as f:
+                    f.write(response.content)
+                
+                return {
+                    "success": True,
+                    "video_url": video_url,
+                    "local_path": output_path,
+                    "text": text,
+                    "voice_id": "oversea_male1",
+                    "original_video_url": talking_video_url
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "No video URL in Kling response",
+                    "original_video_url": talking_video_url
+                }
+                
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "original_video_url": talking_video_url
+            }
+
+    def create_parallel_animations(self, best_image_path, unused_param, output_dir):
+        """Create four parallel VEO2 animations with different actions.
+        
+        Args:
+            best_image_path (str): Path to the best generated image
+            unused_param: Kept for compatibility (ignored)
+            output_dir (str): Directory to save results
+            
+        Returns:
+            dict: Results from all parallel animations
+        """
+        
+        # Define the four animation configurations - all use the same best image
+        animations = [
+            {
+                "name": "Talking",
+                "source_image": best_image_path,
+                "prompt": "The person at the table is talking and interacting intently.",
+                "duration": 5,
+                "parallel_index": 0
+            },
+            {
+                "name": "Banana",
+                "source_image": best_image_path,
+                "prompt": "The person peels a banana and takes a bite of it.",
+                "duration": 5,
+                "parallel_index": 1
+            },
+            {
+                "name": "Nodding",
+                "source_image": best_image_path,
+                "prompt": "The person is not speaking but nodding in agreement with a positive expression.",
+                "duration": 5,
+                "parallel_index": 2
+            },
+            {
+                "name": "Disagreeing",
+                "source_image": best_image_path,
+                "prompt": "The person is not speaking and have their hands crossed, they are disagreeing by shaking their head slightly with a look of mild disapproval.",
+                "duration": 5,
+                "parallel_index": 3
+            }
+        ]
+        
+        parallel_results = {}
+        parallel_id = f"parallel_{int(time.time())}"
+        
+        # Execute animations in parallel
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            # Submit all animation tasks
+            future_to_animation = {
+                executor.submit(
+                    self.animate_best_image_with_veo2,
+                    anim['source_image'],
+                    anim['prompt'],
+                    anim['duration']
+                ): anim
+                for anim in animations
+            }
+            
+            # Process completed animations
+            for future in as_completed(future_to_animation):
+                animation_info = future_to_animation[future]
+                animation_name = animation_info['name']
+                
+                try:
+                    result = future.result()
+                    parallel_results[animation_name] = {
+                        **result,
+                        "animation_name": animation_name,
+                        "parallel_index": animation_info['parallel_index'],
+                        "parallel_id": parallel_id
+                    }
+                except Exception as e:
+                    parallel_results[animation_name] = {
+                        "success": False,
+                        "error": str(e),
+                        "animation_name": animation_name,
+                        "parallel_index": animation_info['parallel_index'],
+                        "parallel_id": parallel_id
+                    }
+        
+        return {
+            "parallel_id": parallel_id,
+            "results": parallel_results,
+            "total_animations": len(animations)
+        }
+
     def process(self, video_url, ai_host_img_path, output_dir):
         """Main processing function that yields progress updates"""
         
@@ -468,7 +685,9 @@ Respond in JSON format:
             "Copying AI host image to output directory"
         )
         
-        ai_host_output = os.path.join(output_dir, "ai_host.jpg")
+        # Preserve the original file extension
+        _, ext = os.path.splitext(ai_host_img_path)
+        ai_host_output = os.path.join(output_dir, f"ai_host{ext}")
         shutil.copy2(ai_host_img_path, ai_host_output)
         
         yield self.emit_step(
@@ -519,6 +738,13 @@ Respond in JSON format:
         )
         
         try:
+            frame_paths = [result['file'] for result in results]
+            generation_result, frame_urls_new, host_url_new = self.generate_scenes_with_ai_host(
+                frame_paths,
+                ai_host_img_path, 
+                output_dir
+            )
+            
             if generation_result:
                 # Save generated images
                 generated_files = self.save_generated_images(generation_result, output_dir)
@@ -655,12 +881,180 @@ Respond in JSON format:
             # Continue with original images if analysis fails
             analyzed_images = generated_images
         
-        # Step 8: Complete
+        # Step 8: Create Parallel Animations
+        yield self.emit_step(
+            "Create Parallel Animations", 
+            "active", 
+            "Starting 4 parallel VEO2 animations..."
+        )
+        
+        try:
+            # Find the best image path
+            best_image_path = None
+            
+            for img_info in analyzed_images:
+                if img_info.get('is_best', False):
+                    best_image_path = img_info['path']
+                    break
+            
+            if not best_image_path:
+                # Fallback to first generated image if no best image found
+                for img_info in analyzed_images:
+                    if 'generated_scene' in img_info['path']:
+                        best_image_path = img_info['path']
+                        break
+            
+            if best_image_path:
+                # Start all parallel animations
+                parallel_id = f"parallel_{int(time.time())}"
+                
+                # Emit parallel step indicators
+                animations = [
+                    {"name": "Talking", "message": "Creating talking animation (5s)..."},
+                    {"name": "Banana", "message": "Creating banana eating animation (5s)..."},
+                    {"name": "Nodding", "message": "Creating nodding animation (5s)..."},
+                    {"name": "Disagreeing", "message": "Creating disagreeing animation (5s)..."}
+                ]
+                
+                # Emit all parallel steps as active
+                for i, anim in enumerate(animations):
+                    yield self.emit_step(
+                        f"Animate {anim['name']}",
+                        "active",
+                        anim['message'],
+                        is_parallel=True,
+                        parallel_id=parallel_id,
+                        parallel_index=i
+                    )
+                
+                # Execute parallel animations
+                parallel_results = self.create_parallel_animations(best_image_path, best_image_path, output_dir)
+                
+                # Emit completion for each animation
+                all_videos = []
+                for animation_name, result in parallel_results['results'].items():
+                    if result.get('success'):
+                        video_result = result['video_result']
+                        video_url = video_result.get('video', {}).get('url') if isinstance(video_result.get('video'), dict) else video_result.get('video')
+                        
+                        video_info = {
+                            "video_url": video_url,
+                            "duration": result['duration'],
+                            "prompt": result['prompt'],
+                            "animation_name": animation_name
+                        }
+                        all_videos.append(video_info)
+                        
+                        yield self.emit_step(
+                            f"Animate {animation_name}",
+                            "completed",
+                            f"{animation_name} animation completed successfully!",
+                            data=video_info,
+                            is_parallel=True,
+                            parallel_id=parallel_id,
+                            parallel_index=result['parallel_index']
+                        )
+                    else:
+                        yield self.emit_step(
+                            f"Animate {animation_name}",
+                            "error",
+                            f"{animation_name} animation failed: {result.get('error', 'Unknown error')}",
+                            is_parallel=True,
+                            parallel_id=parallel_id,
+                            parallel_index=result['parallel_index']
+                        )
+                
+                # Store all_videos for lipsync step
+                self.all_videos = all_videos
+                
+                # Emit overall completion
+                yield self.emit_step(
+                    "Create Parallel Animations",
+                    "completed",
+                    f"Successfully created {len(all_videos)}/4 parallel animations!",
+                    data={
+                        "all_videos": all_videos,
+                        "total_animations": len(parallel_results['results']),
+                        "successful_animations": len(all_videos)
+                    }
+                )
+                
+            else:
+                yield self.emit_step(
+                    "Create Parallel Animations",
+                    "error",
+                    "No suitable image found for animations"
+                )
+                
+        except Exception as e:
+            yield self.emit_step(
+                "Create Parallel Animations",
+                "error",
+                f"Parallel animations failed: {str(e)}"
+            )
+        
+        # Step 9: Apply Lipsync to Talking Video
+        yield self.emit_step(
+            "Apply Lipsync",
+            "active",
+            "Adding audio and lipsync to the talking animation..."
+        )
+        
+        try:
+            # Find the talking video URL from the parallel animations results
+            talking_video_url = None
+            
+            # Look for the talking video in self.all_videos
+            for video_info in self.all_videos:
+                if video_info.get('animation_name') == 'Talking':
+                    talking_video_url = video_info.get('video_url')
+                    break
+            
+            if talking_video_url:
+                # Apply lipsync to the talking video
+                lipsync_result = self.apply_lipsync_to_talking_video(talking_video_url, output_dir)
+                
+                if lipsync_result['success']:
+                    yield self.emit_step(
+                        "Apply Lipsync",
+                        "completed",
+                        "Successfully added audio and lipsync to the talking animation!",
+                        data={
+                            "video_url": lipsync_result['video_url'],
+                            "local_path": lipsync_result['local_path'],
+                            "text": lipsync_result['text'],
+                            "voice_id": lipsync_result['voice_id']
+                        }
+                    )
+                else:
+                    yield self.emit_step(
+                        "Apply Lipsync",
+                        "error",
+                        f"Lipsync failed: {lipsync_result.get('error', 'Unknown error')}"
+                    )
+            else:
+                yield self.emit_step(
+                    "Apply Lipsync",
+                    "error",
+                    "Could not find the talking animation video URL"
+                )
+                
+        except Exception as e:
+            yield self.emit_step(
+                "Apply Lipsync",
+                "error",
+                f"Lipsync processing failed: {str(e)}"
+            )
+        
+        # Step 10: Complete
         total_files = len(results) + 1 + len(generated_files)
+        
+        completion_message = f"Processing completed! Total files: {total_files} (1 frame + 1 AI host + {len(generated_files)} generated scenes)"
+        
         yield self.emit_step(
             "Complete", 
             "completed", 
-            f"Processing completed! Total files: {total_files} (1 frame + 1 AI host + {len(generated_files)} generated scenes)",
+            completion_message,
             data={
                 "total_files": total_files,
                 "output_directory": output_dir
