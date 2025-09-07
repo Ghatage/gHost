@@ -139,6 +139,21 @@ function createGhostModeButton() {
     vertical-align: middle;
   `;
 
+  // Disable initially; will be enabled when processing finishes
+  const setDisabled = (btn, disabled) => {
+    btn.disabled = disabled;
+    if (disabled) {
+      btn.style.background = '#666';
+      btn.style.cursor = 'not-allowed';
+      btn.title = 'Processing… please wait';
+    } else {
+      btn.style.background = '#ff0000';
+      btn.style.cursor = 'pointer';
+      btn.title = 'Replace video with composed final';
+    }
+  };
+  setDisabled(ghostButton, true);
+
   // Add hover effects
   ghostButton.onmouseover = () => {
     ghostButton.style.background = '#cc0000';
@@ -151,6 +166,10 @@ function createGhostModeButton() {
 
   // Add click handler
   ghostButton.onclick = () => {
+    if (ghostButton.disabled) {
+      console.log('gHost button is disabled while processing');
+      return;
+    }
     console.log('👻 gHost Mode button clicked!');
     // Try to use final composed video from backend state; fallback to bundled
     chrome.runtime.sendMessage({ action: 'getAnalyzeState' }, async (res) => {
@@ -222,7 +241,7 @@ function createGhostModeButton() {
     }
     if (inserted) console.log('👻 gHost This button injected in actions row');
 
-    // Verify visibility and fallback to floating button if needed
+  // Verify visibility and fallback to floating button if needed
     const ensureVisible = () => {
       const btn = document.getElementById('ghost-mode-btn');
       if (!btn) return;
@@ -302,7 +321,26 @@ window.createFloatingGhostButton = function() {
   };
 
   // Add click handler
+  // start disabled
+  const setDisabled = (btn, disabled) => {
+    btn.disabled = disabled;
+    if (disabled) {
+      btn.style.background = '#666';
+      btn.style.cursor = 'not-allowed';
+      btn.title = 'Processing… please wait';
+    } else {
+      btn.style.background = '#ff0000';
+      btn.style.cursor = 'pointer';
+      btn.title = 'Replace video with composed final';
+    }
+  };
+  setDisabled(ghostButton, true);
+
   ghostButton.onclick = () => {
+    if (ghostButton.disabled) {
+      console.log('gHost button is disabled while processing');
+      return;
+    }
     console.log('👻 Floating gHost Mode button clicked!');
     chrome.runtime.sendMessage({ action: 'getAnalyzeState' }, async (res) => {
       const state = (res && res.state) || {};
@@ -345,16 +383,46 @@ window.createFloatingGhostButton = function() {
   console.log('🎯 Floating gHost Mode button created!');
 };
 
+// Enable the gHost button when a final video is ready or on restore
+function enableGhostButtonIfReady() {
+  chrome.runtime.sendMessage({ action: 'getAnalyzeState' }, (res) => {
+    const state = (res && res.state) || {};
+    if (state && state.final_url) {
+      const btn = document.getElementById('ghost-mode-btn');
+      if (btn) {
+        btn.disabled = false;
+        btn.style.background = '#ff0000';
+        btn.style.cursor = 'pointer';
+        btn.title = 'Replace video with composed final';
+      }
+    }
+  });
+}
+
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg && msg.type === 'final') {
+    const btn = document.getElementById('ghost-mode-btn');
+    if (btn) {
+      btn.disabled = false;
+      btn.style.background = '#ff0000';
+      btn.style.cursor = 'pointer';
+      btn.title = 'Replace video with composed final';
+    }
+  }
+});
+
 // Initialize when DOM is ready
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', waitForYouTubeAndInject);
+  document.addEventListener('DOMContentLoaded', () => { waitForYouTubeAndInject(); enableGhostButtonIfReady(); });
 } else {
   waitForYouTubeAndInject();
+  enableGhostButtonIfReady();
 }
 
 // One more delayed attempt just in case
 setTimeout(() => {
   if (!document.getElementById('ghost-mode-btn')) createGhostModeButton();
+  enableGhostButtonIfReady();
 }, 3000);
 
 // Also listen for navigation changes (YouTube SPA)

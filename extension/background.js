@@ -2,6 +2,7 @@
 
 const STATE_KEY = 'analyze_state';
 let current = null; // { controller, status, result, startedAt }
+let localhostOpened = false; // ensure we only open once per service-worker lifetime
 
 async function saveState(partial) {
   const prev = (await chrome.storage.local.get(STATE_KEY))[STATE_KEY] || {};
@@ -96,6 +97,25 @@ chrome.runtime.onMessage.addListener((req, _sender, sendResponse) => {
       }
       await saveState({ running: false, canceled: true });
       sendResponse({ ok: true });
+    } else if (req && req.action === 'openLocalhost') {
+      if (!localhostOpened) {
+        try {
+          chrome.tabs.create({ url: 'http://localhost:7000' }, () => {
+            const err = chrome.runtime.lastError;
+            if (err) {
+              sendResponse({ ok: false, error: err.message || String(err) });
+            } else {
+              localhostOpened = true;
+              sendResponse({ ok: true });
+            }
+          });
+          return true;
+        } catch (e) {
+          sendResponse({ ok: false, error: e && e.message ? e.message : String(e) });
+        }
+      } else {
+        sendResponse({ ok: true, alreadyOpened: true });
+      }
     }
   })();
   return true; // keep channel open for async response

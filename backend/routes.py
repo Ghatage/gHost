@@ -223,45 +223,51 @@ async def analyze_stream(body: AnalyzeIn):
                         json.dump(parsed, f, ensure_ascii=False, indent=2)
                     emit({"type": "log", "stage": "ai_text:save", "path": fp})
                     # Compose final video with available AI_clip{i}_{vid}.mp4 files at timestamps from AI_text JSON
+                    final_fp = os.path.join(out_dir, f"final_{vid}.mp4")
                     try:
                         stage("compose", "started")
-                        # Collect up to 4 clip files, ordered by index
-                        clip_candidates = [os.path.join(out_dir, f"AI_clip{i}_{vid}.mp4") for i in range(1, 5)]
-                        clips_found = [p for p in clip_candidates if os.path.exists(p)]
-                        # Optional intro banana clip at t=0
-                        intro_path = os.path.join(out_dir, f"AI_banana_{vid}.mp4")
-                        intro_exists = os.path.exists(intro_path)
-                        emit({"type": "log", "stage": "compose:found", "clips": clips_found, "intro": intro_path if intro_exists else None})
-                        # Build timestamps list from parsed JSON
-                        ts = []
-                        if isinstance(parsed, list):
-                            for item in parsed:
-                                try:
-                                    ts.append(float((item or {}).get("timestamp")))
-                                except Exception:
-                                    pass
-                        # Use the first two available clips and timestamps
-                        if len(clips_found) >= 2 and len(ts) >= 2:
-                            clips_use = clips_found[:2]
-                            ts_use = ts[:2]
-                            final_fp = os.path.join(out_dir, f"final_{vid}.mp4")
-                            emit({"type": "log", "stage": "compose:start", "clips": clips_use, "timestamps": ts_use, "output": final_fp, "intro": intro_path if intro_exists else None})
-                            main_path = (diar or {}).get("video_path")
-                            if not main_path:
-                                # Try to resolve main video again if missing
-                                from .services import _find_local_video
-                                main_path = _find_local_video(vid) or vpath
-                            compose_video_with_inserts(main_path, clips_use, transcript=None, timestamps=ts_use, out_path=final_fp, intro_path=intro_path if intro_exists else None)
-                            emit({"type": "log", "stage": "compose:done", "path": final_fp})
-                            # Emit a final message with URL so the extension can play it
-                            final_url = f"http://127.0.0.1:8000/final_video/{vid}"
-                            emit({"type": "final", "video_id": vid, "final_path": final_fp, "final_url": final_url})
+                        # If final already exists, reuse it and skip composing
+                        if os.path.exists(final_fp):
+                            emit({"type": "log", "stage": "compose:reuse", "path": final_fp})
                         else:
-                            emit({"type": "log", "stage": "compose:skip", "reason": "insufficient_clips_or_timestamps"})
-                        stage("compose", "completed")
+                            # Collect up to 4 clip files, ordered by index
+                            clip_candidates = [os.path.join(out_dir, f"AI_clip{i}_{vid}.mp4") for i in range(1, 5)]
+                            clips_found = [p for p in clip_candidates if os.path.exists(p)]
+                            # Optional intro banana clip at t=0
+                            intro_path = os.path.join(out_dir, f"AI_banana_{vid}.mp4")
+                            intro_exists = os.path.exists(intro_path)
+                            emit({"type": "log", "stage": "compose:found", "clips": clips_found, "intro": intro_path if intro_exists else None})
+                            # Build timestamps list from parsed JSON
+                            ts = []
+                            if isinstance(parsed, list):
+                                for item in parsed:
+                                    try:
+                                        ts.append(float((item or {}).get("timestamp")))
+                                    except Exception:
+                                        pass
+                            emit({"type": "log", "stage": "compose:inputs", "timestamps_found": len(ts), "clips_found": len(clips_found)})
+                            # Use the first two available clips and timestamps
+                            if len(clips_found) >= 2 and len(ts) >= 2:
+                                clips_use = clips_found[:2]
+                                ts_use = ts[:2]
+                                emit({"type": "log", "stage": "compose:start", "clips": clips_use, "timestamps": ts_use, "output": final_fp, "intro": intro_path if intro_exists else None})
+                                main_path = (diar or {}).get("video_path")
+                                if not main_path:
+                                    # Try to resolve main video again if missing
+                                    from .services import _find_local_video
+                                    main_path = _find_local_video(vid) or vpath
+                                compose_video_with_inserts(main_path, clips_use, transcript=None, timestamps=ts_use, out_path=final_fp, intro_path=intro_path if intro_exists else None)
+                                emit({"type": "log", "stage": "compose:done", "path": final_fp})
+                            else:
+                                emit({"type": "log", "stage": "compose:skip", "reason": "insufficient_clips_or_timestamps"})
                     except Exception as e:
                         emit({"type": "log", "stage": "compose:error", "error": str(e)})
+                    finally:
                         stage("compose", "completed")
+                        # Always emit a final message so the popup can finish the flow
+                        final_url = f"http://127.0.0.1:8000/final_video/{vid}"
+                        final_exists = os.path.exists(final_fp)
+                        emit({"type": "final", "video_id": vid, "final_path": final_fp if final_exists else None, "final_url": final_url if final_exists else None})
             except Exception as e:
                 emit({"type": "log", "stage": "ai_text:error", "error": str(e)})
             emit({"type": "result", "diarization": diar, "llm": llm})
